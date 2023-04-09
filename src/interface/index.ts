@@ -11,25 +11,23 @@ export interface WSRequest {
 }
 
 export interface Feedback {
+    requestId: string,
     type: string,
     res: any,
 }
 
 export interface RequestFeedback {
-    type: string,
     status: boolean,
     method: string,
     data: any,
 }
 
-export interface SystemMsg {
-    type: string,
+export interface SystemMsg extends WSRequest {
     msgType: string,
     data: any,
 }
 
-export interface Notify {
-    type: string,
+export interface Notify extends WSRequest {
     notifyType: string,
     channelName: string,
     notifyMsg: string,

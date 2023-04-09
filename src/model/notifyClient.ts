@@ -4,7 +4,7 @@
  * @Autor: lgy
  * @Date: 2023-02-21 23:53:13
  * @LastEditors: “lgy lgy-lgy@qq.com
- * @LastEditTime: 2023-03-13 23:15:06
+ * @LastEditTime: 2023-04-09 16:17:40
  * @Author: “lgy lgy-lgy@qq.com
  * @FilePath: \drawStarts-Notify\src\model\notifyClient.ts
  * 
@@ -114,15 +114,18 @@ export class NotifyClient extends EventEmitter {
 
     // 开始重连
     startReconnect() {
-        if (this.wsClient.readyState === 1) {
-            this.login(this.token);
+        if (this.state === CLIENT_STATE.connected) {
             showTips('success', '重连成功');
+            this.reconnectionTimes = 0;
+            setTimeout(() => {
+                this.login(this.token)
+            }, 1000)
             return;
         } else {
+            this.reconnectionTimes++;
+            showTips('error', `${this.reconnectionTimes}次重连中。。。`);
+            this.createInstance(this.config.url);
             setTimeout(() => {
-                this.reconnectionTimes++;
-                showTips('error', `${this.reconnectionTimes}次重连中。。。`);
-                this.createInstance(this.config.url);
                 this.startReconnect();
             }, 5 * 1000)
         }
@@ -135,6 +138,7 @@ export class NotifyClient extends EventEmitter {
             this.emit(EVENT.DISCONNECT);
             this.emit(EVENT.NOT_READY);
             showTips("error", "ws close");
+            this.state = CLIENT_STATE.disconnect;
             this.startReconnect();
         });
         this.wsClient.addEventListener("message", (event: any) => {
@@ -247,7 +251,7 @@ export class NotifyClient extends EventEmitter {
     // 通过ws发送请求
     private sendRequest(param: any) {
         param.type = SEND_TYPE.request;
-        param.requestId = new Date().getTime(); `${this.clientId}${param.type}${new Date().getTime()}`
+        param.requestId = `${this.clientId}-${param.type}-${new Date().getTime()}`
         this.send(param);
     }
 
