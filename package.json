@@ -1,6 +1,6 @@
 {
   "name": "drawstarts-notify",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "private": false,
   "main": "dist/draw-starts-notify.umd.js",
   "author": "lgy-lgy",

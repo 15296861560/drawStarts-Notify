@@ -4,7 +4,7 @@
  * @Autor: lgy
  * @Date: 2023-02-21 23:53:13
  * @LastEditors: “lgy lgy-lgy@qq.com
- * @LastEditTime: 2023-04-09 16:17:40
+ * @LastEditTime: 2023-06-17 16:58:19
  * @Author: “lgy lgy-lgy@qq.com
  * @FilePath: \drawStarts-Notify\src\model\notifyClient.ts
  * 
@@ -12,8 +12,8 @@
  */
 import EventEmitter from "eventemitter3";
 import { generateId } from "../utils"
-import { CLIENT_STATE, EVENT, SEND_TYPE, METHOD_TYPE, WS_MSG_TYPE, MSG_TYPE, NO_LOGIN_METHOD } from "../constant"
-import { Config, WSRequest, Feedback, RequestFeedback, SystemMsg, Notify } from "../interface"
+import { CLIENT_STATE, EVENT, SEND_TYPE, METHOD_TYPE, WS_MSG_TYPE, MSG_TYPE, NO_LOGIN_METHOD, REQUEST_TIMEOUT } from "../constant"
+import { Config, WSRequest, Feedback, RequestFeedback, SendRequest, SystemMsg, Notify } from "../interface"
 
 /*
  * @Description: 
@@ -77,39 +77,46 @@ export class NotifyClient extends EventEmitter {
 
 
     // 创建实例
-    createInstance(url: string) {
-        this.clientId = generateId(20);
-        this.wsClient = new WebSocket(url);
-        this.wsClient.addEventListener("open", () => {
-            this.isReady = true;
-            this.state = CLIENT_STATE.connected;
-            this.config.url = url;
-            this.emit(EVENT.READY);
-            showTips("success", "ws open");
-            this.subscribeClient();
-        });
+    async createInstance(url: string) {
+        return new Promise((resolve, reject) => {
+            this.clientId = generateId(20);
+            this.wsClient = new WebSocket(url);
+            this.wsClient.addEventListener("open", () => {
+                this.isReady = true;
+                this.state = CLIENT_STATE.connected;
+                this.config.url = url;
+                this.subscribeClient();
+                showTips("success", "ws open");
+                this.emit(EVENT.READY);
+                resolve(true);
+            });
+            this.wsClient.addEventListener("error", (e: any) => {
+                reject(e);
+            })
+        })
+
     }
 
     // 登录认证
-    login(token: string) {
+    async login(token: string) {
         let param = {
             method: METHOD_TYPE.login,
             token,
             clientId: this.clientId,
         }
 
-        this.sendRequest(param);
+        return this.sendRequest(param);
     }
 
     // 登出认证
-    logout(token: string) {
+    async logout(token: string) {
         let param = {
             method: METHOD_TYPE.logout,
             token,
             clientId: this.clientId,
         }
 
-        this.sendRequest(param);
+        return this.sendRequest(param);
     }
 
     // 开始重连
@@ -163,9 +170,10 @@ export class NotifyClient extends EventEmitter {
     }
 
     private feedbackHandle(data: Feedback) {
+        this.emit(EVENT.REQUEST_FEEDBACK, data)
 
         try {
-            let res: RequestFeedback = data.res;
+            const res: RequestFeedback = data.res;
 
             // 请求失败
             if (!res.status) {
@@ -178,6 +186,7 @@ export class NotifyClient extends EventEmitter {
                     this.isLogin = true;
                     this.userId = res.data.userId;
                     this.token = res.data.token;
+                    this.emit(EVENT.LOGINED);
                     this.getAttributes();
                     break;
 
@@ -250,9 +259,35 @@ export class NotifyClient extends EventEmitter {
 
     // 通过ws发送请求
     private sendRequest(param: any) {
-        param.type = SEND_TYPE.request;
-        param.requestId = `${this.clientId}-${param.type}-${new Date().getTime()}`
-        this.send(param);
+        return new Promise((resolve, reject) => {
+            param.type = SEND_TYPE.request;
+            const requestId = `${this.clientId}-${param.type}-${param.method}-${new Date().getTime()}`;
+            param.requestId = requestId;
+            this.send(param);
+
+            const requestHandle = (data: Feedback) => {
+
+                if (data.requestId === requestId) {
+                    const res: RequestFeedback = data.res;
+                    if (res.status) {
+                        resolve(res)
+                    } else {
+                        reject(res)
+                    }
+                    this.off(EVENT.REQUEST_FEEDBACK, requestHandle);
+                }
+
+            }
+            const timeout = setTimeout(() => {
+                this.off(EVENT.REQUEST_FEEDBACK, requestHandle);
+                resolve('timeout...')
+            }, REQUEST_TIMEOUT)
+            this.on(EVENT.REQUEST_FEEDBACK, requestHandle);
+
+
+
+        })
+
     }
 
 
@@ -286,14 +321,14 @@ export class NotifyClient extends EventEmitter {
 
 
     // 加入频道
-    joinChannel(channelName: string) {
+    async joinChannel(channelName: string) {
         let param = { method: METHOD_TYPE.joinChannel, channelName };
-        this.sendRequest(param);
+        return this.sendRequest(param);
     }
     // 离开频道
-    leaveChannel(channelName: string) {
+    async leaveChannel(channelName: string) {
         let param = { method: METHOD_TYPE.leaveChannel, channelName };
-        this.sendRequest(param);
+        return this.sendRequest(param);
     }
     // 销毁实例
     destroyed() {
@@ -302,21 +337,21 @@ export class NotifyClient extends EventEmitter {
     }
 
     // 获取属性
-    private getAttributes() {
+    private async getAttributes() {
         let param = {
             method: METHOD_TYPE.getAttributes
         }
 
-        this.sendRequest(param);
+        return this.sendRequest(param);
     }
     // 获取某频道的属性
-    private getChannelAttribute(channelName: string) {
+    private async getChannelAttribute(channelName: string) {
         let param = {
             channelName,
             method: METHOD_TYPE.getChannelAttribute
         }
 
-        this.sendRequest(param);
+        return this.sendRequest(param);
     }
 
     // 添加通知回调执行函数

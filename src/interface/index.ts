@@ -22,6 +22,12 @@ export interface RequestFeedback {
     data: any,
 }
 
+export interface SendRequest extends WSRequest {
+    method: string,
+    requestId: string,
+    type: string,
+}
+
 export interface SystemMsg extends WSRequest {
     msgType: string,
     data: any,

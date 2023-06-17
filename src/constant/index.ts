@@ -4,7 +4,7 @@
  * @Autor: lgy
  * @Date: 2023-02-25 22:02:14
  * @LastEditors: “lgy lgy-lgy@qq.com
- * @LastEditTime: 2023-03-19 22:43:05
+ * @LastEditTime: 2023-06-17 16:22:04
  */
 export enum CLIENT_STATE {
     disconnect = "disconnect",
@@ -19,6 +19,8 @@ export enum EVENT {
     SYS_PLATFORM = "SYS_PLATFORM",
     SYS_CHANNEL = "SYS_CHANNEL",
     SYS_SINGLE = "SYS_SINGLE",
+    LOGINED = "LOGINED",
+    REQUEST_FEEDBACK = "REQUEST_FEEDBACK",
 }
 
 export enum SEND_TYPE {
@@ -49,3 +51,4 @@ export enum METHOD_TYPE {
 
 export const NO_LOGIN_METHOD = [String(METHOD_TYPE.login)];
 
+export const REQUEST_TIMEOUT=1000*60;
