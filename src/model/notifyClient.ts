@@ -4,7 +4,7 @@
  * @Autor: lgy
  * @Date: 2023-02-21 23:53:13
  * @LastEditors: “lgy lgy-lgy@qq.com
- * @LastEditTime: 2023-06-17 16:58:19
+ * @LastEditTime: 2023-06-17 18:44:45
  * @Author: “lgy lgy-lgy@qq.com
  * @FilePath: \drawStarts-Notify\src\model\notifyClient.ts
  * 
@@ -105,18 +105,29 @@ export class NotifyClient extends EventEmitter {
             clientId: this.clientId,
         }
 
-        return this.sendRequest(param);
+        const res: RequestFeedback = await this.sendRequest(param) as RequestFeedback;
+        if (res.status) {
+            this.isLogin = true;
+            this.userId = res.data.userId;
+            this.token = res.data.token;
+            this.emit(EVENT.LOGINED);
+            this.getAttributes();
+        }
+
+        return res.status;
     }
 
     // 登出认证
     async logout(token: string) {
-        let param = {
+        const param = {
             method: METHOD_TYPE.logout,
             token,
             clientId: this.clientId,
         }
 
-        return this.sendRequest(param);
+        const res: RequestFeedback = await this.sendRequest(param) as RequestFeedback;
+
+        return res.status;
     }
 
     // 开始重连
@@ -153,7 +164,7 @@ export class NotifyClient extends EventEmitter {
             switch (data.type) {
                 // 操作反馈
                 case WS_MSG_TYPE.feedback:
-                    this.feedbackHandle(data);
+                    this.emit(EVENT.REQUEST_FEEDBACK, data)
                     break;
                 // 系统消息
                 case WS_MSG_TYPE.sys:
@@ -169,57 +180,6 @@ export class NotifyClient extends EventEmitter {
         });
     }
 
-    private feedbackHandle(data: Feedback) {
-        this.emit(EVENT.REQUEST_FEEDBACK, data)
-
-        try {
-            const res: RequestFeedback = data.res;
-
-            // 请求失败
-            if (!res.status) {
-                throw (res.data)
-            }
-
-
-            switch (res.method) {
-                case METHOD_TYPE.login:
-                    this.isLogin = true;
-                    this.userId = res.data.userId;
-                    this.token = res.data.token;
-                    this.emit(EVENT.LOGINED);
-                    this.getAttributes();
-                    break;
-
-                case METHOD_TYPE.joinChannel:
-                    this.channels.set(res.data.channelName, { isJoin: true, joinTime: new Date().getTime(), msgList: [] });
-                    this.getChannelAttribute(res.data.channelName);
-                    break;
-
-                case METHOD_TYPE.leaveChannel:
-                    this.channels.delete(res.data.channelName);
-                    break;
-
-                case METHOD_TYPE.getAttributes:
-                    this.attribute = res.data.attribute;
-                    break;
-
-                case METHOD_TYPE.getChannelAttribute:
-                    let channelName: string = res.data.channelName;
-                    this.attribute[channelName] = res.data.attribute;
-                    Object.keys(this.attribute[channelName]).forEach(notifyKey => {
-                        this.notifyParams.set(notifyKey, this.attribute[channelName][notifyKey])
-                    })
-                    break;
-                default:
-                    break;
-            }
-
-        } catch (e: any) {
-            showTips("error", e);
-
-        }
-
-    }
     private sysHandle(data: SystemMsg) {
         switch (data.msgType) {
             // 平台消息
@@ -272,19 +232,18 @@ export class NotifyClient extends EventEmitter {
                     if (res.status) {
                         resolve(res)
                     } else {
+                        showTips("error", res.data);
                         reject(res)
                     }
                     this.off(EVENT.REQUEST_FEEDBACK, requestHandle);
                 }
 
             }
-            const timeout = setTimeout(() => {
+            setTimeout(() => {
                 this.off(EVENT.REQUEST_FEEDBACK, requestHandle);
                 resolve('timeout...')
             }, REQUEST_TIMEOUT)
             this.on(EVENT.REQUEST_FEEDBACK, requestHandle);
-
-
 
         })
 
@@ -322,13 +281,24 @@ export class NotifyClient extends EventEmitter {
 
     // 加入频道
     async joinChannel(channelName: string) {
-        let param = { method: METHOD_TYPE.joinChannel, channelName };
-        return this.sendRequest(param);
+        const param = { method: METHOD_TYPE.joinChannel, channelName };
+        const res: RequestFeedback = await this.sendRequest(param) as RequestFeedback;
+        if (res.status) {
+            await this.getChannelAttribute(res.data.channelName);
+            this.channels.set(res.data.channelName, { isJoin: true, joinTime: new Date().getTime(), msgList: [] });
+        }
+
+        return res.status;
     }
     // 离开频道
     async leaveChannel(channelName: string) {
-        let param = { method: METHOD_TYPE.leaveChannel, channelName };
-        return this.sendRequest(param);
+        const param = { method: METHOD_TYPE.leaveChannel, channelName };
+        const res: RequestFeedback = await this.sendRequest(param) as RequestFeedback;
+        if (res.status) {
+            this.channels.delete(res.data.channelName);
+        }
+
+        return res.status;
     }
     // 销毁实例
     destroyed() {
@@ -338,20 +308,33 @@ export class NotifyClient extends EventEmitter {
 
     // 获取属性
     private async getAttributes() {
-        let param = {
+        const param = {
             method: METHOD_TYPE.getAttributes
         }
+        const res: RequestFeedback = await this.sendRequest(param) as RequestFeedback;
 
-        return this.sendRequest(param);
+        if (res.status) {
+            this.attribute = res.data.attribute;
+        }
+
+        return res.status;
     }
     // 获取某频道的属性
     private async getChannelAttribute(channelName: string) {
-        let param = {
+        const param = {
             channelName,
             method: METHOD_TYPE.getChannelAttribute
         }
+        const res: RequestFeedback = await this.sendRequest(param) as RequestFeedback;
+        if (res.status) {
+            const channelName: string = res.data.channelName;
+            this.attribute[channelName] = res.data.attribute;
+            Object.keys(this.attribute[channelName]).forEach(notifyKey => {
+                this.notifyParams.set(notifyKey, this.attribute[channelName][notifyKey])
+            })
+        }
 
-        return this.sendRequest(param);
+        return res.status;;
     }
 
     // 添加通知回调执行函数

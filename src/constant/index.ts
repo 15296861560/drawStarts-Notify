@@ -51,4 +51,4 @@ export enum METHOD_TYPE {
 
 export const NO_LOGIN_METHOD = [String(METHOD_TYPE.login)];
 
-export const REQUEST_TIMEOUT=1000*60;
+export const REQUEST_TIMEOUT = 1000 * 60;
