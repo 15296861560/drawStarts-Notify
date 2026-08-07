@@ -1,368 +1,532 @@
-/*
- * @Description: 
- * @Version: 2.0
- * @Autor: lgy
- * @Date: 2023-02-21 23:53:13
- * @LastEditors: “lgy lgy-lgy@qq.com
- * @LastEditTime: 2023-06-17 18:44:45
- * @Author: “lgy lgy-lgy@qq.com
- * @FilePath: \drawStarts-Notify\src\model\notifyClient.ts
- * 
- * Copyright (c) 2023 by ${git_name_email}, All Rights Reserved. 
- */
-import EventEmitter from "eventemitter3";
-import { generateId } from "../utils"
-import { CLIENT_STATE, EVENT, SEND_TYPE, METHOD_TYPE, WS_MSG_TYPE, MSG_TYPE, NO_LOGIN_METHOD, REQUEST_TIMEOUT } from "../constant"
-import { Config, WSRequest, Feedback, RequestFeedback, SendRequest, SystemMsg, Notify } from "../interface"
+import EventEmitter from 'eventemitter3'
+import { generateId } from '../utils'
+import {
+  CLIENT_STATE,
+  EVENT,
+  SEND_TYPE,
+  METHOD_TYPE,
+  WS_MSG_TYPE,
+  MSG_TYPE,
+  NO_LOGIN_METHOD,
+  REQUEST_TIMEOUT,
+  DEFAULT_HEARTBEAT_INTERVAL,
+  ERROR_CODE,
+  SYS_EVENT,
+} from '../constant'
+import {
+  Config,
+  WSRequest,
+  Feedback,
+  RequestFeedback,
+  SystemMsg,
+  Notify,
+  SendNotifyParam,
+} from '../interface'
 
-/*
- * @Description: 
- * @Version: 2.0
- * @Autor: lgy
- * @Date: 2023-02-21 23:53:13
- * @LastEditors: “lgy lgy-lgy@qq.com
- * @LastEditTime: 2023-03-09 23:27:05
- */
 function showTips(type: string, msg: string) {
-    console.log(`${type}:${msg}`)
+  console.log(`[notify-client] ${type}: ${msg}`)
 }
 
 export class NotifyClient extends EventEmitter {
-    //客户端id
-    private clientId: string;
-    // 用户id
-    private userId: string;
-    // ws连接
-    private wsClient: any;
-    // 已加入的频道
-    private channels: Map<string, Object>;
-    // 配置信息
-    private config: Config;
-    // 属性信息
-    private attribute: any;
-    // 连接是否已建立
-    private isReady: Boolean;
-    // 是否已登录
-    private isLogin: Boolean;
-    // 当前连接状态
-    private state: string;
-    // 通知回调函数
-    private notifyCallbackMap: Map<string, Array<Function>>;
-    // 各个频道对应的通知
-    private notifyParams: Map<string, string>;
-    // 重连次数
-    private reconnectionTimes: number;
-    // 登录票据
-    private token: string;
-    constructor() {
-        super();
-        this.clientId = '';
-        this.userId = '';
-        this.wsClient = null;
-        this.channels = new Map();
-        this.config = { url: '' };
-        this.attribute = {};
-        this.isReady = false;
-        this.isLogin = false;
-        this.state = CLIENT_STATE.disconnect;
-        this.notifyCallbackMap = new Map();
-        this.notifyParams = new Map();
-        this.reconnectionTimes = 0;
-        this.token = '';
+  private clientId = ''
+  private userId = ''
+  private wsClient: WebSocket | null = null
+  private channels: Map<string, { isJoin: boolean; joinTime: number }> = new Map()
+  private config: Config = { url: '', autoReconnect: true }
+  private attribute: any = {}
+  private isReady = false
+  private isLogin = false
+  private state = CLIENT_STATE.disconnect
+  private notifyCallbackMap: Map<string, Array<Function>> = new Map()
+  private notifyParams: Map<string, string> = new Map()
+  private reconnectionTimes = 0
+  private token = ''
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private manualClose = false
+  private seenMessageIds = new Set<string>()
+
+  get channelInfo() {
+    return this.attribute
+  }
+
+  get ready() {
+    return this.isReady
+  }
+
+  get loggedIn() {
+    return this.isLogin
+  }
+
+  get currentUserId() {
+    return this.userId
+  }
+
+  get currentClientId() {
+    return this.clientId
+  }
+
+  async createInstance(url: string, options: Partial<Config> = {}) {
+    this.manualClose = false
+    this.config = {
+      url,
+      autoReconnect: options.autoReconnect !== false,
+      heartbeatInterval: options.heartbeatInterval ?? DEFAULT_HEARTBEAT_INTERVAL,
+      requestTimeout: options.requestTimeout ?? REQUEST_TIMEOUT,
+      autoAck: options.autoAck !== false,
     }
 
-    get channelInfo() {
-        return this.attribute;
+    return new Promise<boolean>((resolve, reject) => {
+      this.clientId = generateId(20)
+      this.state = CLIENT_STATE.connecting
+      this.wsClient = new WebSocket(url)
+
+      const onOpen = () => {
+        this.isReady = true
+        this.state = CLIENT_STATE.connected
+        this.subscribeClient()
+        this.startHeartbeat()
+        showTips('success', 'ws open')
+        this.emit(EVENT.READY)
+        resolve(true)
+      }
+      const onError = (e: Event) => {
+        reject(e)
+      }
+
+      this.wsClient.addEventListener('open', onOpen, { once: true })
+      this.wsClient.addEventListener('error', onError, { once: true })
+    })
+  }
+
+  async login(token: string) {
+    this.token = token
+    const param = {
+      method: METHOD_TYPE.login,
+      token,
+      clientId: this.clientId,
+    }
+    const res = (await this.sendRequest(param)) as RequestFeedback
+    if (res.status) {
+      this.isLogin = true
+      this.userId = res.data.userId
+      this.token = res.data.token
+      this.emit(EVENT.LOGINED)
+      await this.fetchAttributes()
+    }
+    return res
+  }
+
+  async logout() {
+    try {
+      const res = (await this.sendRequest({
+        method: METHOD_TYPE.logout,
+        token: this.token,
+        clientId: this.clientId,
+      })) as RequestFeedback
+      return res
+    } finally {
+      this.clearSession()
+      this.emit(EVENT.LOGOUT)
+    }
+  }
+
+  async joinChannel(channelName: string) {
+    const res = (await this.sendRequest({
+      method: METHOD_TYPE.joinChannel,
+      channelName,
+    })) as RequestFeedback
+    if (res.status) {
+      await this.fetchChannelAttribute(res.data.channelName)
+      this.channels.set(res.data.channelName, {
+        isJoin: true,
+        joinTime: Date.now(),
+      })
+    }
+    return res
+  }
+
+  async leaveChannel(channelName: string) {
+    const res = (await this.sendRequest({
+      method: METHOD_TYPE.leaveChannel,
+      channelName,
+    })) as RequestFeedback
+    if (res.status) {
+      this.channels.delete(res.data.channelName)
+    }
+    return res
+  }
+
+  /** 公开：获取自身会话属性 */
+  async fetchAttributes() {
+    const res = (await this.sendRequest({
+      method: METHOD_TYPE.getAttributes,
+    })) as RequestFeedback
+    if (res.status) {
+      this.attribute = {
+        ...this.attribute,
+        self: res.data.attribute,
+      }
+    }
+    return res
+  }
+
+  /** 公开：获取频道通知缓存属性 */
+  async fetchChannelAttribute(channelName: string) {
+    const res = (await this.sendRequest({
+      method: METHOD_TYPE.getChannelAttribute,
+      channelName,
+    })) as RequestFeedback
+    if (res.status) {
+      const name: string = res.data.channelName
+      this.attribute[name] = res.data.attribute
+      Object.keys(res.data.attribute || {}).forEach((notifyKey) => {
+        this.notifyParams.set(notifyKey, res.data.attribute[notifyKey])
+      })
+    }
+    return res
+  }
+
+  /**
+   * 发送通知
+   * msgType: channel(默认) | single | all
+   */
+  async sendNotify(param: SendNotifyParam) {
+    const payload: WSRequest = {
+      type: SEND_TYPE.notify,
+      notifyType: param.notifyType,
+      notifyMsg: param.notifyMsg,
+      channelName: param.channelName,
+      msgType: param.msgType || MSG_TYPE.channel,
+      targetUserId: param.targetUserId,
+      targetClientId: param.targetClientId,
+      needAck: param.needAck,
+      excludeSender: param.excludeSender,
     }
 
-
-    // 创建实例
-    async createInstance(url: string) {
-        return new Promise((resolve, reject) => {
-            this.clientId = generateId(20);
-            this.wsClient = new WebSocket(url);
-            this.wsClient.addEventListener("open", () => {
-                this.isReady = true;
-                this.state = CLIENT_STATE.connected;
-                this.config.url = url;
-                this.subscribeClient();
-                showTips("success", "ws open");
-                this.emit(EVENT.READY);
-                resolve(true);
-            });
-            this.wsClient.addEventListener("error", (e: any) => {
-                reject(e);
-            })
-        })
-
+    if (param.waitAck) {
+      return this.sendRequest({
+        ...payload,
+        method: SEND_TYPE.notify,
+      } as any)
     }
 
-    // 登录认证
-    async login(token: string) {
-        let param = {
-            method: METHOD_TYPE.login,
-            token,
-            clientId: this.clientId,
+    const ok = this.send(payload)
+    if (!ok) {
+      return {
+        status: false,
+        method: SEND_TYPE.notify,
+        code: ERROR_CODE.NOT_LOGIN,
+        message: 'not ready or not login',
+        data: {},
+      }
+    }
+    return {
+      status: true,
+      method: SEND_TYPE.notify,
+      code: ERROR_CODE.OK,
+      message: 'sent',
+      data: {},
+    }
+  }
+
+  /** 确认已收到消息 */
+  async ack(messageId: string) {
+    return this.sendRequest({
+      method: METHOD_TYPE.ack,
+      messageId,
+    })
+  }
+
+  /** 拉取频道历史 */
+  async pullHistory(channelName: string, cursor?: string, limit = 50) {
+    return this.sendRequest({
+      method: METHOD_TYPE.pullHistory,
+      channelName,
+      cursor,
+      limit,
+    })
+  }
+
+  /** 主动拉取离线消息 */
+  async pullOffline(limit = 50) {
+    return this.sendRequest({
+      method: METHOD_TYPE.pullOffline,
+      limit,
+    })
+  }
+
+  addNotifyCallback(
+    type: string,
+    channelName: string,
+    callback: Function,
+    firstExecute = false
+  ) {
+    const notifyKey = `${type}:${channelName}`
+    const callbackList = this.notifyCallbackMap.get(notifyKey) || []
+    if (!callbackList.find((c) => c === callback)) {
+      callbackList.push(callback)
+      this.notifyCallbackMap.set(notifyKey, callbackList)
+    }
+    if (firstExecute) {
+      const paramStr = this.notifyParams.get(notifyKey) || '{}'
+      try {
+        callback(JSON.parse(paramStr))
+      } catch {
+        callback({})
+      }
+    }
+  }
+
+  deleteNotifyCallback(type: string, channelName: string) {
+    this.notifyCallbackMap.delete(`${type}:${channelName}`)
+  }
+
+  deleteCallback(type: string, channelName: string, callback: Function) {
+    const notifyKey = `${type}:${channelName}`
+    const callbackList = this.notifyCallbackMap.get(notifyKey) || []
+    const callbackIndex = callbackList.findIndex((c) => c === callback)
+    if (callbackIndex > -1) {
+      callbackList.splice(callbackIndex, 1)
+    }
+  }
+
+  destroyed() {
+    this.manualClose = true
+    this.stopHeartbeat()
+    this.clearReconnectTimer()
+    this.clearSession()
+    if (this.wsClient) {
+      try {
+        this.wsClient.close()
+      } catch {
+        // ignore
+      }
+    }
+    this.wsClient = null
+    this.isReady = false
+    this.state = CLIENT_STATE.disconnect
+    this.emit(EVENT.DISCONNECT)
+  }
+
+  private clearSession() {
+    this.isLogin = false
+    this.userId = ''
+    this.channels.clear()
+  }
+
+  private startHeartbeat() {
+    this.stopHeartbeat()
+    const interval = this.config.heartbeatInterval || DEFAULT_HEARTBEAT_INTERVAL
+    this.heartbeatTimer = setInterval(() => {
+      if (!this.isReady || !this.wsClient || this.wsClient.readyState !== WebSocket.OPEN) {
+        return
+      }
+      void this.sendRequest({ method: METHOD_TYPE.heartbeat }).catch(() => {
+        // heartbeat failure handled by reconnect on close
+      })
+    }, interval)
+  }
+
+  private stopHeartbeat() {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer)
+      this.heartbeatTimer = null
+    }
+  }
+
+  private clearReconnectTimer() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+  }
+
+  private startReconnect() {
+    if (this.manualClose || this.config.autoReconnect === false) {
+      return
+    }
+    this.clearReconnectTimer()
+    this.reconnectionTimes += 1
+    showTips('error', `${this.reconnectionTimes}次重连中...`)
+    this.reconnectTimer = setTimeout(async () => {
+      try {
+        await this.createInstance(this.config.url, this.config)
+        if (this.token) {
+          await this.login(this.token)
         }
+        this.reconnectionTimes = 0
+        showTips('success', '重连成功')
+      } catch {
+        this.startReconnect()
+      }
+    }, Math.min(5000 * this.reconnectionTimes, 30000))
+  }
 
-        const res: RequestFeedback = await this.sendRequest(param) as RequestFeedback;
+  private subscribeClient() {
+    if (!this.wsClient) {
+      return
+    }
+
+    this.wsClient.addEventListener('close', () => {
+      this.stopHeartbeat()
+      this.isReady = false
+      this.isLogin = false
+      this.state = CLIENT_STATE.disconnect
+      this.emit(EVENT.DISCONNECT)
+      this.emit(EVENT.NOT_READY)
+      showTips('error', 'ws close')
+      this.startReconnect()
+    })
+
+    this.wsClient.addEventListener('message', (event: MessageEvent) => {
+      let data: any
+      try {
+        data = JSON.parse(String(event.data))
+      } catch {
+        return
+      }
+      switch (data.type) {
+        case WS_MSG_TYPE.feedback:
+          this.emit(EVENT.REQUEST_FEEDBACK, data)
+          break
+        case WS_MSG_TYPE.sys:
+          this.sysHandle(data)
+          break
+        case WS_MSG_TYPE.notify:
+          this.notifyHandle(data)
+          break
+        default:
+          break
+      }
+    })
+  }
+
+  private sysHandle(data: SystemMsg) {
+    if (data.event === SYS_EVENT.tokenExpire || data.event === SYS_EVENT.kicked) {
+      this.clearSession()
+      this.emit(EVENT.TOKEN_EXPIRE, data)
+    }
+    if (data.event === SYS_EVENT.serverShutdown) {
+      showTips('error', 'server shutdown')
+    }
+    if (data.event === SYS_EVENT.offlineSync) {
+      this.emit(EVENT.OFFLINE_SYNC, data)
+    }
+
+    switch (data.msgType) {
+      case MSG_TYPE.all:
+        this.emit(EVENT.SYS_PLATFORM, data)
+        break
+      case MSG_TYPE.channel:
+        this.emit(EVENT.SYS_CHANNEL, data)
+        break
+      case MSG_TYPE.single:
+        this.emit(EVENT.SYS_SINGLE, data)
+        break
+      default:
+        break
+    }
+  }
+
+  private notifyHandle(data: Notify) {
+    if (data.messageId) {
+      if (this.seenMessageIds.has(data.messageId)) {
+        return
+      }
+      this.seenMessageIds.add(data.messageId)
+      if (this.seenMessageIds.size > 2000) {
+        const first = this.seenMessageIds.values().next().value
+        if (first) this.seenMessageIds.delete(first)
+      }
+    }
+
+    this.emit(EVENT.NOTIFY, data)
+    const notifyKey = `${data.notifyType}:${data.channelName || ''}`
+    const callbackList = this.notifyCallbackMap.get(notifyKey) || []
+    let param: any = {}
+    try {
+      param = JSON.parse(data.notifyMsg || '{}')
+    } catch {
+      param = data.notifyMsg
+    }
+    callbackList.forEach((callback) => callback(param, data))
+
+    if (data.needAck && data.messageId && this.config.autoAck !== false) {
+      void this.ack(data.messageId).catch(() => {
+        // ignore ack failure
+      })
+    }
+  }
+
+  private sendVerify(param: WSRequest) {
+    if (param.type === SEND_TYPE.request && param.method && NO_LOGIN_METHOD.indexOf(param.method) > -1) {
+      return this.isReady
+    }
+    if (param.type === SEND_TYPE.notify) {
+      return this.isReady && this.isLogin
+    }
+    return this.isReady && this.isLogin
+  }
+
+  private sendRequest(param: any): Promise<RequestFeedback> {
+    return new Promise((resolve, reject) => {
+      // notify + waitAck 时 type 已是 notify
+      if (param.type !== SEND_TYPE.notify) {
+        param.type = SEND_TYPE.request
+      }
+      const requestId = `${this.clientId}-${param.type}-${param.method || 'notify'}-${Date.now()}`
+      param.requestId = requestId
+
+      if (!this.send(param)) {
+        reject({
+          status: false,
+          method: param.method || '',
+          code: ERROR_CODE.NOT_LOGIN,
+          message: 'not ready or not login',
+          data: {},
+        } as RequestFeedback)
+        return
+      }
+
+      const timeout = this.config.requestTimeout || REQUEST_TIMEOUT
+      const timer = setTimeout(() => {
+        this.off(EVENT.REQUEST_FEEDBACK, requestHandle)
+        reject({
+          status: false,
+          method: param.method || '',
+          code: ERROR_CODE.TIMEOUT,
+          message: 'timeout',
+          data: {},
+        } as RequestFeedback)
+      }, timeout)
+
+      const requestHandle = (data: Feedback) => {
+        if (data.requestId !== requestId) {
+          return
+        }
+        clearTimeout(timer)
+        this.off(EVENT.REQUEST_FEEDBACK, requestHandle)
+        const res = data.res
         if (res.status) {
-            this.isLogin = true;
-            this.userId = res.data.userId;
-            this.token = res.data.token;
-            this.emit(EVENT.LOGINED);
-            this.getAttributes();
-        }
-
-        return res.status;
-    }
-
-    // 登出认证
-    async logout(token: string) {
-        const param = {
-            method: METHOD_TYPE.logout,
-            token,
-            clientId: this.clientId,
-        }
-
-        const res: RequestFeedback = await this.sendRequest(param) as RequestFeedback;
-
-        return res.status;
-    }
-
-    // 开始重连
-    startReconnect() {
-        if (this.state === CLIENT_STATE.connected) {
-            showTips('success', '重连成功');
-            this.reconnectionTimes = 0;
-            setTimeout(() => {
-                this.login(this.token)
-            }, 1000)
-            return;
+          resolve(res)
         } else {
-            this.reconnectionTimes++;
-            showTips('error', `${this.reconnectionTimes}次重连中。。。`);
-            this.createInstance(this.config.url);
-            setTimeout(() => {
-                this.startReconnect();
-            }, 5 * 1000)
+          showTips('error', res.message || JSON.stringify(res.data))
+          reject(res)
         }
+      }
+      this.on(EVENT.REQUEST_FEEDBACK, requestHandle)
+    })
+  }
+
+  private send(param: WSRequest): boolean {
+    if (!this.sendVerify(param) || !this.wsClient) {
+      return false
     }
-
-    // 发布监听
-    private subscribeClient() {
-
-        this.wsClient.addEventListener("close", () => {
-            this.emit(EVENT.DISCONNECT);
-            this.emit(EVENT.NOT_READY);
-            showTips("error", "ws close");
-            this.state = CLIENT_STATE.disconnect;
-            this.startReconnect();
-        });
-        this.wsClient.addEventListener("message", (event: any) => {
-            let data: any = JSON.parse(event.data);
-            switch (data.type) {
-                // 操作反馈
-                case WS_MSG_TYPE.feedback:
-                    this.emit(EVENT.REQUEST_FEEDBACK, data)
-                    break;
-                // 系统消息
-                case WS_MSG_TYPE.sys:
-                    this.sysHandle(data);
-                    break;
-                // 通知
-                case WS_MSG_TYPE.notify:
-                    this.notifyHandle(data);
-                    break;
-                default:
-                    break;
-            }
-        });
-    }
-
-    private sysHandle(data: SystemMsg) {
-        switch (data.msgType) {
-            // 平台消息
-            case MSG_TYPE.all:
-                this.emit(EVENT.SYS_PLATFORM, data)
-                break;
-            // 特定群体消息
-            case MSG_TYPE.channel:
-                this.emit(EVENT.SYS_CHANNEL, data)
-                break;
-            // 个人消息
-            case MSG_TYPE.single:
-                this.emit(EVENT.SYS_SINGLE, data)
-                break;
-            default:
-                break;
-        }
-    }
-    private notifyHandle(data: Notify) {
-        let notifyKey: string = `${data.notifyType}:${data.channelName}`;
-        let callbackList: Array<Function> = this.notifyCallbackMap.get(notifyKey) || [];
-        let param = JSON.parse(data.notifyMsg || '{}');
-        callbackList.forEach(callback => {
-            callback(param);
-        })
-
-    }
-
-    // 发送前校验
-    private sendVerify(param: WSRequest) {
-        if (param.type === SEND_TYPE.request && NO_LOGIN_METHOD.indexOf(param.method) > -1) {
-            return this.isReady;
-        } else {
-            return this.isReady && this.isLogin;
-        }
-    }
-
-    // 通过ws发送请求
-    private sendRequest(param: any) {
-        return new Promise((resolve, reject) => {
-            param.type = SEND_TYPE.request;
-            const requestId = `${this.clientId}-${param.type}-${param.method}-${new Date().getTime()}`;
-            param.requestId = requestId;
-            this.send(param);
-
-            const requestHandle = (data: Feedback) => {
-
-                if (data.requestId === requestId) {
-                    const res: RequestFeedback = data.res;
-                    if (res.status) {
-                        resolve(res)
-                    } else {
-                        showTips("error", res.data);
-                        reject(res)
-                    }
-                    this.off(EVENT.REQUEST_FEEDBACK, requestHandle);
-                }
-
-            }
-            setTimeout(() => {
-                this.off(EVENT.REQUEST_FEEDBACK, requestHandle);
-                resolve('timeout...')
-            }, REQUEST_TIMEOUT)
-            this.on(EVENT.REQUEST_FEEDBACK, requestHandle);
-
-        })
-
-    }
-
-
-    /**
-    * @description: 通过ws发送通知
-    * @param {
-    * type:String,
-    * notifyType:String
-    * notifyMsg:String
-    * channelName:String
-    * } params
-    * @return {*}
-    * @author: lgy
-    */
-    sendNotify(param: WSRequest) {
-        param.type = SEND_TYPE.notify;
-        this.send(param);
-    }
-
-    // 发送消息
-    private send(param: WSRequest) {
-        if (!this.sendVerify(param)) {
-            return
-        }
-        param.sendTime = new Date().getTime();
-        param.userId = this.userId;
-        param.clientId = this.clientId;
-        let paramStr: string = JSON.stringify(param);
-        this.wsClient.send(paramStr);
-    }
-
-
-    // 加入频道
-    async joinChannel(channelName: string) {
-        const param = { method: METHOD_TYPE.joinChannel, channelName };
-        const res: RequestFeedback = await this.sendRequest(param) as RequestFeedback;
-        if (res.status) {
-            await this.getChannelAttribute(res.data.channelName);
-            this.channels.set(res.data.channelName, { isJoin: true, joinTime: new Date().getTime(), msgList: [] });
-        }
-
-        return res.status;
-    }
-    // 离开频道
-    async leaveChannel(channelName: string) {
-        const param = { method: METHOD_TYPE.leaveChannel, channelName };
-        const res: RequestFeedback = await this.sendRequest(param) as RequestFeedback;
-        if (res.status) {
-            this.channels.delete(res.data.channelName);
-        }
-
-        return res.status;
-    }
-    // 销毁实例
-    destroyed() {
-        this.state = EVENT.DISCONNECT;
-        this.wsClient = null;
-    }
-
-    // 获取属性
-    private async getAttributes() {
-        const param = {
-            method: METHOD_TYPE.getAttributes
-        }
-        const res: RequestFeedback = await this.sendRequest(param) as RequestFeedback;
-
-        if (res.status) {
-            this.attribute = res.data.attribute;
-        }
-
-        return res.status;
-    }
-    // 获取某频道的属性
-    private async getChannelAttribute(channelName: string) {
-        const param = {
-            channelName,
-            method: METHOD_TYPE.getChannelAttribute
-        }
-        const res: RequestFeedback = await this.sendRequest(param) as RequestFeedback;
-        if (res.status) {
-            const channelName: string = res.data.channelName;
-            this.attribute[channelName] = res.data.attribute;
-            Object.keys(this.attribute[channelName]).forEach(notifyKey => {
-                this.notifyParams.set(notifyKey, this.attribute[channelName][notifyKey])
-            })
-        }
-
-        return res.status;;
-    }
-
-    // 添加通知回调执行函数
-    addNotifyCallback(type: string, channelName: string, callback: Function, firstExecute: Boolean = false) {
-        const notifyKey: string = `${type}:${channelName}`;
-        let callbackList: Array<Function> = this.notifyCallbackMap.get(notifyKey) || [];
-        // 判断是否重复添加回调
-        if (!callbackList.find(c => c === callback)) {
-            callbackList.push(callback);
-            this.notifyCallbackMap.set(notifyKey, callbackList);
-        }
-        // 挂载时是否需要执行
-        if (firstExecute) {
-            let paramStr = this.notifyParams.get(notifyKey) || '{}';
-            callback(JSON.parse(paramStr));
-        }
-    }
-    // 删除通知回调
-    deleteNotifyCallback(type: string, channelName: string) {
-        const notifyKey: string = `${type}:${channelName}`;
-        this.notifyCallbackMap.delete(notifyKey);
-    }
-    // 删除通知回调执行函数
-    deleteCallback(type: string, channelName: string, callback: Function) {
-        let notifyKey: string = `${type}:${channelName}`;
-        let callbackList: Array<Function> = this.notifyCallbackMap.get(notifyKey) || [];
-        let callbackIndex = callbackList.findIndex(c => c === callback);
-        callbackList.splice(callbackIndex, 1)
-    }
-
+    param.sendTime = Date.now()
+    param.userId = this.userId
+    param.clientId = this.clientId
+    this.wsClient.send(JSON.stringify(param))
+    return true
+  }
 }
